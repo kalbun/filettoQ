@@ -6,8 +6,10 @@ from typing import NewType, List, Tuple
 from collections import deque
 
 BOARD_CELLS = 9
-STATES = 18
-ACTIONS = 9
+STATES = 27
+OFS_WHITE = 9
+OFS_BLACK = 18
+ACTIONS = BOARD_CELLS
 
 REWARD_WIN = 0.5
 REWARD_LOSE = -0.5
@@ -21,9 +23,10 @@ Let's define board's positions as follow:
     3   4   5
     6   7   8
 
-State is a vector defining the board state.
-The first 9 elements define the empty/filled state (0 = empty).
-The remaining 9 define white/black piece (0 = black).
+State is a vector defining the board state using one-hot coding.
+Elements 0:8 define the empty/filled state (0 = empty).
+Elements 9:17 define if a white piece is present (1) or not (0).
+Elements 18:26 do the same for black pieces.
 
 """
 State = NewType('State',np.ndarray[STATES])
@@ -33,20 +36,6 @@ Action describes the action to execute, using one-hot encoding.
 Action[i] == 1 means that a piece will be put in position i.
 """
 Action = NewType('Action', np.ndarray[ACTIONS])
-
-def isActionValid(state: State, action: int) -> bool:
-    """
-    Check if a certain action, expressed as the position where to put a piece,
-    is valid considering the configuration in state_s.
-
-    Input:
-        state = current board state
-        action = intended position for a new piece
-    Return:
-        True if the move is valid, false otherwise
-    """
-    return ( (action in range(9)) and (state[action] == 0) )
-
 
 def filetto(_state: State, action: Action, whiteMoves: bool ) -> Tuple[ State, int, bool, bool]:
     """
@@ -67,51 +56,49 @@ def filetto(_state: State, action: Action, whiteMoves: bool ) -> Tuple[ State, i
         return state, REWARD_WRONG, False
     # Move is valid. Calculate reward. To do so, see if this move make us win or lose.
     state[action] = 1 # now occupied
-    state[action + 9] = whiteMoves   # 1 for white move
+    if (whiteMoves):
+        state[action + 9] = 1
+    else:
+        state[action + 18] = 1
     #
     # Check winning combinations
     #
     for rowcol in range(2):
         if (np.dot(state[(rowcol*3):(rowcol*3)+3],np.ones(3)) == 3):
-            # row is fully occupied, check colors
-            colors: int = np.dot(state[(rowcol*3)+9:(rowcol*3)+3+9],np.ones(3))
-            if (colors == 3):
+            # row is fully occupied, check white
+            if (np.dot(state[(rowcol*3)+OFS_WHITE:(rowcol*3)+3+OFS_WHITE],np.ones(3)) == 3):
                 # all pieces white, game won
                 return state, REWARD_WIN, True
-            if (colors == 0):
+            if (np.dot(state[(rowcol*3)+OFS_BLACK:(rowcol*3)+3+OFS_BLACK],np.ones(3)) == 3):
                 # all pieces black, game lost
                 return state, REWARD_LOSE, True
         # columns are 0:3:6 or 1:4:7 or 2:5:8
         if (np.dot(state[[rowcol,rowcol+3,rowcol+6]],np.ones(3)) == 3):
             # column is fully occupied, check colors
-            colors: int = np.dot(state[[rowcol+9,rowcol+3+9,rowcol+6+9]],np.ones(3))
-            if (colors == 3):
+            if (np.dot(state[[rowcol+OFS_WHITE,rowcol+3+OFS_WHITE,rowcol+6+OFS_WHITE]],np.ones(3)) == 3):
                 # all pieces white, game won
                 return state, REWARD_WIN, True
-            if (colors == 0):
+            if (np.dot(state[[rowcol+OFS_BLACK,rowcol+3+OFS_BLACK,rowcol+6+OFS_BLACK]],np.ones(3)) == 3):
                 # all pieces black, game lost
                 return state, REWARD_LOSE, True
     # check diagonals
     if (state[0] + state[4] + state[8] == 3):
-        colors: int = state[9] + state[4+9] + state[8+9]
-        if (colors == 3):
+        if (state[0+OFS_WHITE] + state[4+OFS_WHITE] + state[8+OFS_WHITE] == 3):
             # all pieces white, game won
             return state, REWARD_WIN, True
-        if (colors == 0):
+        if (state[0+OFS_BLACK] + state[4+OFS_BLACK] + state[8+OFS_BLACK] == 3):
             # all pieces black, game lost
             return state, REWARD_LOSE, True
     if (state[2] + state[4] + state[6] == 3):
-        colors: int = state[2+9] + state[4+9] + state[6+9]
-        if (colors == 3):
+        if (state[2+OFS_WHITE] + state[4+OFS_WHITE] + state[6+OFS_WHITE] == 3):
             # all pieces white, game won
             return state, REWARD_WIN, True
-        if (colors == 0):
+        if (state[2+OFS_BLACK] + state[4+OFS_BLACK] + state[6+OFS_BLACK] == 3):
             # all pieces black, game lost
             return state, REWARD_LOSE, True
     # check if the board is full with no winner
-    if (np.dot(state[0:ACTIONS],np.ones(ACTIONS)) == ACTIONS):
+    if (np.dot(state[0:BOARD_CELLS],np.ones(ACTIONS)) == ACTIONS):
         return state, REWARD_OTHER , True
-    # 
     return state, REWARD_OTHER , False
 
 # Function to draw the board
@@ -129,7 +116,7 @@ def user_turn(board,board_state):
         if move.isdigit() and int(move) in range(1, 10) and board[int(move) - 1] == ' ':
             move = (int)(move) - 1
             board_state[move] = 1
-            board_state[move+9] = 1
+            board_state[move+OFS_WHITE] = 1
             return move
         else:
             print("Invalid move. Try again.")
@@ -140,10 +127,11 @@ def computer_turn(board,board_state,Q):
     returns_for_s = Q.predict(x= board_state.reshape(1,-1),verbose=0)
     # now we need to select only possible values. To do so, multiply by
     # the negate of board_state[0:9] which contains 1 if the cell is filled.
-    returns_for_s = returns_for_s * (1 - board_state[0:9])
+    returns_for_s = returns_for_s * (1 - board_state[0:BOARD_CELLS])
     # now get the position of maximum value: that's the move
     move = np.argmax(returns_for_s)
     board_state[move] = 1
+    board_state[move+OFS_BLACK] = 1
     return move
 
 # Function to check for a win
@@ -174,7 +162,7 @@ def main() -> None:
     # create networks Q and Q*
     Q = model = keras.models.Sequential(
         [
-        Dense(18,activation="relu", input_dim = STATES),
+        Dense(32,activation="relu", input_dim = STATES),
 #        Dense(18,activation="relu"),
         Dense(ACTIONS,activation="linear")
         ]
@@ -182,7 +170,7 @@ def main() -> None:
 
     QStar = model = keras.models.Sequential(
         [
-        Dense(18,activation="relu", input_dim = STATES),
+        Dense(32,activation="relu", input_dim = STATES),
 #        Dense(18,activation="relu"),
         Dense(ACTIONS,activation="linear")
         ]
