@@ -142,24 +142,28 @@ def filetto(_state: State, action: Action, whiteMoves: bool ) -> Tuple[ State, i
 
 def train(_Q: keras.models.Sequential, _QStar: keras.models.Sequential) -> None:
 
-    debug: bool = True
+    debug: bool = False
     if (debug == False):
-        TRAIN_EPISODES = 100     # repetition of training with different minibuffers
+        TRAIN_EPISODES = 200     # repetition of training with different minibuffers
         MINIBUFFER_SIZE = 32     # size of minibuffers
         EXPBUFFER_SIZE = 10000   # size of experience buffer during prediction phase
-        PREDICTED_SAMPLES = 2000  # how many samples are create at each predict phase
+        SAMPLES_TO_PREDICT = 2000  # how many samples are create at each predict phase
         ACCEPTED_LOSS = 1e-3     # if average loss goes below this value, Q is declared trained
         LOSS_MAVG_SAMPLES = 250   # samples for calculating moving average of loss
+        EACH_N_TRAINING = 25    # training cycles before print a dot during training
+        EACH_N_PREDICTS = 25     # predictions before print a dot during predict
     else:
         TRAIN_EPISODES = 25     # at least 25
         MINIBUFFER_SIZE = 32
         EXPBUFFER_SIZE = 300
-        PREDICTED_SAMPLES = 50
+        SAMPLES_TO_PREDICT = 50
         ACCEPTED_LOSS = 100
         LOSS_MAVG_SAMPLES = 25
+        EACH_N_TRAINING = 25
+        EACH_N_PREDICTS = 25
 
     EPSILON: float = 1
-    EPSILON_DECAY: float = 0.01
+    EPSILON_DECAY: float = 0.05
     GAMMA: float = 0.95
     state_s : State = np.zeros(STATES,dtype=np.int8)
     state_s1 : State = np.zeros(STATES,dtype=np.int8)
@@ -169,7 +173,7 @@ def train(_Q: keras.models.Sequential, _QStar: keras.models.Sequential) -> None:
     return_for_s_a: float = 0.0
     is_game_over: bool = False
 
-    lossBuffer: List[float] = []
+    lossBuffer = deque(maxlen=LOSS_MAVG_SAMPLES*4)
     # Create a fixed-size buffer that automatically discards oldest experiences when full
     experience_buffer = deque(maxlen=EXPBUFFER_SIZE)
 
@@ -184,13 +188,17 @@ def train(_Q: keras.models.Sequential, _QStar: keras.models.Sequential) -> None:
     state_s = np.zeros_like(state_s)
     training_cycle: int = 0
     averageLoss: float = 1000.0
+
+    csvfile = open("losses.csv","wt")
+    csvfile.write("loss;")
+
     while (averageLoss > ACCEPTED_LOSS):
 
         training_cycle += 1
         print(f"Cycle {training_cycle}")
         # Build the experience buffer by accumulating samples
-        print("Build experience ")
-        for _ in range(PREDICTED_SAMPLES):
+        print(f"\nPredict {SAMPLES_TO_PREDICT} samples (one dot = {EACH_N_PREDICTS} predictions)")
+        for sample in range(SAMPLES_TO_PREDICT):
             # Predict the return values for s. The NN returns all the nine values.
             # Use epsilon-greedy policy to choose action that either maximizes
             # return, or is random.
@@ -217,11 +225,11 @@ def train(_Q: keras.models.Sequential, _QStar: keras.models.Sequential) -> None:
                 state_s = state_s1
             # alternate white and black moves (used in the simulator)
             isWhite = not isWhite
-            if (len(experience_buffer) % 100 == 0):
-                print(f"{len(experience_buffer)}/{EXPBUFFER_SIZE}")
+            if ((sample > 0) and (sample % EACH_N_PREDICTS == 0)):
+                print(".",end="")
         EPSILON = max(EPSILON_DECAY,EPSILON-EPSILON_DECAY)
 
-        print("Train",end='')
+        print(f"\nTrain {TRAIN_EPISODES} times with {MINIBUFFER_SIZE} minibuffers (one dot = {EACH_N_TRAINING} training cycles)")
         # Now create random minibuffers to train the network
         for episode in range(1,TRAIN_EPISODES+1):
             print(".",end='')
@@ -240,21 +248,17 @@ def train(_Q: keras.models.Sequential, _QStar: keras.models.Sequential) -> None:
                 QTrainY[row] = (reward_in_s + GAMMA * return_for_s1_a1).reshape(1,-1)
                 currentLoss = _QStar.fit(x=QTrainX,y=QTrainY,verbose=0).history['loss'][0]
                 lossBuffer.append(currentLoss)
-            if ( (episode > 0) and (episode % 25 == 0)):
+            if ( (episode > 0) and (episode % EACH_N_TRAINING == 0)):
                 # copy Qstar layers to Qs
                 for q_layer, qstar_layer in zip(_Q.layers, _QStar.layers):
                     q_layer.set_weights(qstar_layer.get_weights())
                 # update moving average
-                averageLoss = np.average(lossBuffer[-LOSS_MAVG_SAMPLES:])
+                averageLoss = np.average(list(lossBuffer)[-LOSS_MAVG_SAMPLES:])
+                csvfile.write(f"{averageLoss}\n")
                 print(f"Average loss: {averageLoss}")
 
     keras.models.save_model(_Q,"filetto_model_tf.bin",save_format="tf")
-        # also export history of losses
-    with open('losses.csv', 'wt') as file:
-        file.write('loss\n')
-        for loss in lossBuffer:
-            file.write(f"{loss}\n")
-        file.close()
+    csvfile.close()
 
 def play(_Q: keras.models.Sequential):
     """
