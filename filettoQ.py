@@ -5,7 +5,6 @@ import argparse
 import random
 from typing import NewType, Tuple
 from collections import deque
-import datetime
 import wandb
 from wandb.integration.keras import WandbMetricsLogger,WandbModelCheckpoint
 
@@ -41,7 +40,7 @@ and a black piece in position i+9.
 """
 Action = NewType('Action', np.ndarray[ACTIONS])
 
-def defineNetworks() -> Tuple[keras.models.Sequential, keras.models.Sequential]:
+def defineNetworks() -> Tuple[keras.models.Sequential, keras.models.Sequential,bool]:
     """
     Create two identical networks (Q and QStar) used during reinforcement
     learning operations.
@@ -53,23 +52,27 @@ def defineNetworks() -> Tuple[keras.models.Sequential, keras.models.Sequential]:
     a parameter, maybe later.
 
     *return*:
-        Tuple contaning the two initialised and compiled networks
+        Q network
+        Q* network
+        a boolean set to True if Q was loaded from a network file, False otherwise
     """
+    Qcreated: bool = False
+
     _QStar = keras.models.Sequential()
     _QStar.add(keras.Input(shape=STATES))
+    _QStar.add(keras.layers.Dense(72, activation='relu'))
     _QStar.add(keras.layers.Dense(36, activation='relu'))
-    _QStar.add(keras.layers.Dense(18, activation='relu'))
     _QStar.add(keras.layers.Dense(ACTIONS, activation='linear'))
-    _QStar.compile(optimizer=keras.optimizers.Adam(learning_rate=1e-3),loss=keras.losses.mean_squared_error)
+    _QStar.compile(optimizer=keras.optimizers.Adam(),loss=keras.losses.mean_squared_error)
 
     wandb.init(
         # set the wandb project where this run will be logged
         project="filettoQ",
         # track hyperparameters and run metadata with wandb.config
         config={
-            "layer_1": 36,
+            "layer_1": 72,
             "activation_1": "relu",
-            "layer_2": 18,
+            "layer_2": 36,
             "activation_2": "relu",
             "layer_3": 9,
             "activation_3": "linear",
@@ -85,16 +88,16 @@ def defineNetworks() -> Tuple[keras.models.Sequential, keras.models.Sequential]:
         print("Loading neural networks")
         # load and compile
         _Q = keras.models.load_model("filetto_model_tf.bin",compile=True)
-        # copy Q layers to Qstar
         for q_layer, qstar_layer in zip(_Q.layers, _QStar.layers):
             qstar_layer.set_weights(q_layer.get_weights())
     except:
+        Qcreated = True
         print("Building neural networks")
         # create networks Q and Q*
         _Q = keras.models.Sequential()
         _Q.add(keras.Input(shape=STATES))
+        _Q.add(keras.layers.Dense(72, activation='relu'))
         _Q.add(keras.layers.Dense(36, activation='relu'))
-        _Q.add(keras.layers.Dense(18, activation='relu'))
         _Q.add(keras.layers.Dense(ACTIONS, activation='linear'))
         # Q does not need loss function, we just it for predict
         _Q.compile()
@@ -106,9 +109,10 @@ def defineNetworks() -> Tuple[keras.models.Sequential, keras.models.Sequential]:
             w = rng.standard_normal(size=(w.shape[0],w.shape[1]))
             b = rng.standard_normal(size=b.shape[0])
             layer.set_weights([w,b])
+        for q_layer, qstar_layer in zip(_Q.layers, _QStar.layers):
+            qstar_layer.set_weights(q_layer.get_weights())
 
-
-    return _Q,_QStar
+    return _Q,_QStar,Qcreated
 
 def filetto(_state: State, action: Action, whiteMoves: bool ) -> Tuple[ State, float, bool]:
     """
@@ -191,6 +195,10 @@ def train(_Q: keras.models.Sequential, _QStar: keras.models.Sequential, initial_
         and want to reduce random exploration.
     """
 
+    epsilon: float = initial_epsilon
+    EPSILON_DECAY = 0.01
+    GAMMA = 0.95
+
     # Set debug to true if you want to perform very quick predict/fit cycles to check if
     # the code contains errors.
     debug: bool = False
@@ -198,11 +206,14 @@ def train(_Q: keras.models.Sequential, _QStar: keras.models.Sequential, initial_
         TRAIN_EPISODES = 250        # repetition of training with different minibuffers
         MINIBUFFER_SIZE = 32        # size of minibuffers
         EXPBUFFER_SIZE = 10000      # size of experience buffer during prediction phase
-        SAMPLES_TO_PREDICT = 1000   # how many samples are create at each predict phase
-        ACCEPTED_LOSS = 0.01        # if average loss goes below this value, Q is declared trained
+        SAMPLES_TO_PREDICT = 2000   # how many samples are create at each predict phase
         LOSS_MAVG_SAMPLES = 100     # samples for calculating moving average of loss
         EACH_N_TRAINING = 50        # training cycles before print a dot during training
         EACH_N_PREDICTS = 50        # predictions before print a dot during predict
+        # If average loss goes below this value, Q is declared trained.
+        # This number is chosen small enough to allow Q discriminate between a good and
+        # a neutral move even at the maximum distance (eight moves).
+        ACCEPTED_LOSS = ((REWARD_WIN - REWARD_OTHER) * GAMMA ** (BOARD_CELLS-1))/2
     else:
         TRAIN_EPISODES = 25         # at least equal to EACH_N_TRAINING 
         MINIBUFFER_SIZE = 32
@@ -213,9 +224,6 @@ def train(_Q: keras.models.Sequential, _QStar: keras.models.Sequential, initial_
         EACH_N_TRAINING = 25
         EACH_N_PREDICTS = 25
 
-    EPSILON: float = initial_epsilon
-    EPSILON_DECAY: float = 0.01
-    GAMMA: float = 0.95
     state_s : State = np.zeros(STATES,dtype=np.int8)
     state_s1 : State = np.zeros(STATES,dtype=np.int8)
     action_a: int = 0
@@ -251,14 +259,14 @@ def train(_Q: keras.models.Sequential, _QStar: keras.models.Sequential, initial_
         training_cycle += 1
         print(f"Cycle {training_cycle}")
         print(f"\nPredict {SAMPLES_TO_PREDICT} samples (one dot = {EACH_N_PREDICTS} predictions)")
-        print(f"epsilon is {EPSILON}")
+        print(f"epsilon is {epsilon}")
         # Build the experience buffer by accumulating samples
         for sample in range(SAMPLES_TO_PREDICT):
             # Predict the return values for s. The NN returns all the nine values.
             # Use epsilon-greedy policy to choose action that either maximizes
             # return, or is random.
             returns_for_s_a = _Q.predict(x= state_s.reshape(1,-1),verbose=0)
-            if (random.random() > EPSILON):
+            if (random.random() > epsilon):
                 # get the maximum return value. Subtract -10000 from return for filled
                 # cells so that they are never selected
                 return_for_s_a = np.max(returns_for_s_a[0] - (state_s[0:ACTIONS] * 10000 ))
@@ -279,7 +287,7 @@ def train(_Q: keras.models.Sequential, _QStar: keras.models.Sequential, initial_
             isWhite = not isWhite
             if ((sample > 0) and (sample % EACH_N_PREDICTS == 0)):
                 print(".",end="")
-        EPSILON = max(EPSILON_DECAY,EPSILON-EPSILON_DECAY)
+        epsilon = max(EPSILON_DECAY,epsilon-EPSILON_DECAY)
 
         print(f"\nTrain {TRAIN_EPISODES} times with minibuffers of {MINIBUFFER_SIZE} samples")
         # Now create random minibuffers to train the network
@@ -362,11 +370,13 @@ def play(_Q: keras.models.Sequential):
     def computer_turn(board_state):
         # retrieve all the returns for all the moves
         returns_for_s = _Q.predict(x= board_state.reshape(1,-1),verbose=0)
-        # Now get the position of maximum value, that's the move with highest return.
-        # Note that, to avoid already filled cells, we set the corresponding
-        # return value to a very low number.
-        returns_for_s[0, board_state[0:9]+board_state[9:18] != 0 ] = -1e5
-        move = np.argmax(returns_for_s)
+        # Now get the position corresponding to *lowest* return.
+        # Lowest, because victory and loss scores are calculated from
+        # human point of view, and the computer must maximise chances of loss.
+        # To prevent selecting actions corresponding to filled cells,  the corresponding
+        # return value to a very high number.
+        returns_for_s[0, board_state[0:9]+board_state[9:18] != 0 ] = 1e5
+        move = np.argmin(returns_for_s)
         return move
 
     # Start the game
@@ -406,21 +416,23 @@ def main():
     parser: argparse.ArgumentParser = argparse.ArgumentParser(
         "Filetto 0.1\nA silly game to learn DQN"
     )
-    parser.add_argument('-l','--load',action='store_true',help="Load existing network model from filetto_model_tf.bin")
+    parser.add_argument('-s','--skip',action='store_true' ,help="skip training")
     parser.add_argument('-e','--epsilon',default=1.0,help="Set starting value for epsilon-greedy policy. Default 1.0")
     args = parser.parse_args()
     Q: keras.models.Sequential
     QStar: keras.models.Sequential
+    Qcreated: bool
+    epsilon: float = float(args.epsilon)
 
-    if (args.epsilon < 0.01):
-        print(f"{args.epsilon} is too low for epsilon, setting to 0.01")
-        args.epsilon = 0.01
-    if (args.epsilon > 1):
-        print(f"{args.epsilon} is too big for epsilon, setting to 1.0")
-        args.epsilon = 1.0
-    Q,QStar = defineNetworks()
-    if (args.load):
-        train(Q,QStar,args.epsilon)
+    if (epsilon < 0.01):
+        print(f"{epsilon} is too low for epsilon, setting to 0.01")
+        epsilon = 0.01
+    if (epsilon > 1):
+        print(f"{epsilon} is too big for epsilon, setting to 1.0")
+        epsilon = 1.0
+    Q, QStar, Qcreated = defineNetworks()
+    if (not args.skip):
+        train(Q,QStar,epsilon)
     play(Q)
 
 main()
